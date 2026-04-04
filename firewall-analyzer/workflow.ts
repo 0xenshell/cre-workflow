@@ -327,11 +327,21 @@ export const onActionSubmitted = (
 		target: target,
 		value: actionValue.toString(),
 	})
+	// Convert string to base64 for HTTP body (no btoa/Buffer in QuickJS WASM)
+	const bodyBytes = new TextEncoder().encode(analysisBody)
+	const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+	let bodyBase64 = ''
+	for (let i = 0; i < bodyBytes.length; i += 3) {
+		const a = bodyBytes[i], b = bodyBytes[i + 1] || 0, c = bodyBytes[i + 2] || 0
+		bodyBase64 += chars[(a >> 2)] + chars[((a & 3) << 4) | (b >> 4)] +
+			(i + 1 < bodyBytes.length ? chars[((b & 15) << 2) | (c >> 6)] : '=') +
+			(i + 2 < bodyBytes.length ? chars[c & 63] : '=')
+	}
 	httpClient.sendRequest(runtime, {
 		url: `${config.relayUrl}/analysis/${actionId}`,
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: btoa(analysisBody),
+		body: bodyBase64,
 	})
 	runtime.log(`Analysis posted to relay for action #${actionId}`)
 
