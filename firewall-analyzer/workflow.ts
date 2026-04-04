@@ -9,6 +9,7 @@ import {
 	bytesToHex,
 	hexToBase64,
 	prepareReportRequest,
+	encodeCallMsg,
 	type Runtime,
 	type EVMLog,
 } from '@chainlink/cre-sdk'
@@ -17,7 +18,9 @@ import {
 	type Address,
 	parseAbi,
 	encodeAbiParameters,
+	decodeAbiParameters,
 	parseAbiParameters,
+	encodeFunctionData,
 	decodeEventLog,
 	keccak256,
 	toBytes,
@@ -38,6 +41,7 @@ type Config = z.infer<typeof configSchema>
 const FIREWALL_ABI = parseAbi([
 	'event ActionSubmitted(uint256 indexed actionId, string indexed agentId, address target, uint256 value, bytes32 instructionHash)',
 	'function onReport(bytes metadata, bytes report) external',
+	'function getQueuedAction(uint256 actionId) external view returns (string agentId, address target, uint256 value, bytes data, bytes32 instructionHash, uint256 queuedAt, bool resolved, uint8 decision)',
 ])
 
 // ─── ActionSubmitted event signature ────────────────────────
@@ -188,10 +192,18 @@ You MUST evaluate EVERY item in this checklist for every request. Your reasoning
 	}
 }
 
+// ─── Helper: bytes or base64 → hex ──────────────────────────
+// CRE runtime may deliver protobuf bytes fields as base64 strings (JSON variant)
+const toHex = (v: Uint8Array | string): `0x${string}` => {
+	if (typeof v === 'string') {
+		return `0x${Buffer.from(v, 'base64').toString('hex')}` as `0x${string}`
+	}
+	return bytesToHex(v) as `0x${string}`
+}
+
 // ─── Write Report On-Chain ───────────────────────────────────
 function writeReportOnChain(
 	runtime: Runtime<Config>,
-	agentId: string,
 	actionId: bigint,
 	decision: number,
 	threatScore: number,
@@ -206,23 +218,59 @@ function writeReportOnChain(
 	if (!network) throw new Error(`Network not found: ${config.chainSelectorName}`)
 
 	const evmClient = new EVMClient(network.chainSelector.selector)
+	const contractAddr = config.firewallContractAddress
+	runtime.log(`contractAddr value: ${contractAddr}`)
 
-	// ABI-encode the report data: (actionId, agentId, decision, threatScore)
+	// Read the agentId from the contract's action queue
+	const callData = encodeFunctionData({
+		abi: FIREWALL_ABI,
+		functionName: 'getQueuedAction',
+		args: [actionId],
+	})
+
+	// Convert address to hex if it's base64 (CRE runtime normalizes config values)
+	const hexAddr = contractAddr.startsWith('0x')
+		? contractAddr as `0x${string}`
+		: `0x${Buffer.from(contractAddr, 'base64').toString('hex')}` as `0x${string}`
+
+	const callResult = evmClient.callContract(runtime, {
+		call: encodeCallMsg({
+			from: '0x0000000000000000000000000000000000000000',
+			to: hexAddr,
+			data: callData,
+		}),
+	}).result()
+
+	// callResult.data is Uint8Array or base64 string
+	const returnData = typeof callResult.data === 'string'
+		? `0x${Buffer.from(callResult.data, 'base64').toString('hex')}` as `0x${string}`
+		: bytesToHex(callResult.data) as `0x${string}`
+
+	runtime.log(`callContract returnData: ${returnData.substring(0, 130)}...`)
+
+	// Return is a struct wrapped in an outer tuple — decode as a single tuple param
+	const [structData] = decodeAbiParameters(
+		parseAbiParameters('(string, address, uint256, bytes, bytes32, uint256, bool, uint8)'),
+		returnData,
+	)
+
+	const agentId = structData[0] as string
+	runtime.log(`Resolved agentId from contract: ${agentId}`)
+
+	// ABI-encode report matching contract's abi.decode order:
+	// (string agentId, uint256 actionId, uint8 decision, uint256 rawThreatScore)
 	const encodedReport = encodeAbiParameters(
-		parseAbiParameters('uint256, string, uint8, uint256'),
-		[actionId, agentId, decision, BigInt(threatScore)],
+		parseAbiParameters('string, uint256, uint8, uint256'),
+		[agentId, actionId, decision, BigInt(threatScore)],
 	)
 
 	// Prepare and sign the report through the DON
 	const reportRequest = prepareReportRequest(encodedReport)
 	const signedReport = runtime.report(reportRequest).result()
-
-	// Write the signed report to the firewall contract
 	const result = evmClient.writeReport(runtime, {
-		receiver: config.firewallContractAddress,
+		receiver: hexAddr,
 		report: signedReport,
 	}).result()
-
 	runtime.log(`On-chain write complete: status=${result.txStatus}, txHash=${result.txHash ? bytesToHex(result.txHash) : 'N/A'}`)
 }
 
@@ -236,13 +284,6 @@ export const onActionSubmitted = (
 	runtime.log('ActionSubmitted event detected - starting analysis pipeline')
 
 	// Step 1 - Decode event data from the log
-	// CRE runtime may deliver log fields as base64 strings (LogJson) instead of Uint8Array (Log)
-	const toHex = (v: Uint8Array | string): `0x${string}` => {
-		if (typeof v === 'string') {
-			return `0x${Buffer.from(v, 'base64').toString('hex')}` as `0x${string}`
-		}
-		return bytesToHex(v) as `0x${string}`
-	}
 	const topics = log.topics.map(toHex) as [`0x${string}`, ...`0x${string}`[]]
 	const data = toHex(log.data)
 
@@ -260,10 +301,6 @@ export const onActionSubmitted = (
 		instructionHash: string
 	}
 
-	// agentId is indexed (hashed in topic), we need to read it from the queued action
-	// For now we'll pass a placeholder and the contract's onReport decodes the agentId from the report
-	const agentId = 'pending'
-
 	runtime.log(`Action #${actionId}: target=${target}, value=${actionValue}, hash=${instructionHash}`)
 
 	// Step 2 - Get oracle private key from secrets
@@ -279,9 +316,9 @@ export const onActionSubmitted = (
 	const analysis = analyzeWithClaude(runtime, instruction, target, actionValue.toString())
 
 	// Step 6 - Write report on-chain (resolveAction + updateThreatScore)
-	writeReportOnChain(runtime, agentId, actionId, analysis.decision, analysis.score)
+	writeReportOnChain(runtime, actionId, analysis.decision, analysis.score)
 
-	runtime.log(`Pipeline complete: agent=${agentId}, action=${actionId}, decision=${analysis.decision}, score=${analysis.score}`)
+	runtime.log(`Pipeline complete: action=${actionId}, decision=${analysis.decision}, score=${analysis.score}`)
 
 	return `Analyzed: ${analysis.reasoning}`
 }
