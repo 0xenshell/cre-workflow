@@ -73,6 +73,10 @@ Run the workflow simulation:
 cre workflow simulate firewall-analyzer --target staging-settings
 ```
 
+```bash
+cre workflow simulate firewall-analyzer --target staging-settings --evm-tx-hash <TX_HASH> --evm-event-index 0 --trigger-index 0 --non-interactive --skip-type-checks --broadcast
+```
+
 This compiles the workflow to WASM and executes it locally, simulating the full pipeline:
 1. Log trigger fires on `ActionSubmitted`
 2. Encrypted instruction fetched from relay
