@@ -15,6 +15,9 @@ import {
 	toBytes,
 	toHex,
 } from 'viem'
+import { getSharedSecret } from '@noble/secp256k1'
+import { gcm } from '@noble/ciphers/aes.js'
+import { sha256 } from '@noble/hashes/sha2.js'
 
 // ─── Config Schema ──────────────────────────────────────────
 export const configSchema = z.object({
@@ -59,6 +62,43 @@ function fetchFromRelay(
 
 	runtime.log(`Relay response received: payload length ${response.encryptedPayload.length}`)
 	return response.encryptedPayload
+}
+
+// ─── Decrypt Instruction Inside TEE ─────────────────────────
+function decryptInstruction(
+	runtime: Runtime<Config>,
+	encryptedHex: string,
+	privateKeyHex: string,
+): string {
+	// Remove 0x prefix and convert to bytes
+	const clean = encryptedHex.replace('0x', '')
+	const packed = new Uint8Array(clean.length / 2)
+	for (let i = 0; i < packed.length; i++) {
+		packed[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16)
+	}
+
+	// Unpack: ephemeralPublic (33) + nonce (12) + ciphertext (rest)
+	const ephemeralPublic = packed.slice(0, 33)
+	const nonce = packed.slice(33, 45)
+	const ciphertext = packed.slice(45)
+
+	// ECDH to derive shared secret
+	const privBytes = new Uint8Array(privateKeyHex.replace('0x', '').length / 2)
+	for (let i = 0; i < privBytes.length; i++) {
+		privBytes[i] = parseInt(privateKeyHex.replace('0x', '').substring(i * 2, i * 2 + 2), 16)
+	}
+
+	const sharedSecret = getSharedSecret(privBytes, ephemeralPublic)
+	const aesKey = sha256(sharedSecret)
+
+	// AES-256-GCM decrypt
+	const decipher = gcm(aesKey, nonce)
+	const decrypted = decipher.decrypt(ciphertext)
+
+	const plaintext = new TextDecoder().decode(decrypted)
+	runtime.log(`Decrypted instruction: ${plaintext.substring(0, 50)}...`)
+
+	return plaintext
 }
 
 // ─── Log Trigger Callback ───────────────────────────────────
