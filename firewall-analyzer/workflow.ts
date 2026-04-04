@@ -317,20 +317,21 @@ export const onActionSubmitted = (
 
 	// Step 6 - Post analysis to relay for dashboard display
 	const httpClient = new HTTPClient()
+	const analysisBody = JSON.stringify({
+		agentId: 'pending',
+		actionId: Number(actionId),
+		score: analysis.score,
+		decision: analysis.decision,
+		reasoning: analysis.reasoning,
+		instruction: instruction,
+		target: target,
+		value: actionValue.toString(),
+	})
 	httpClient.sendRequest(runtime, {
 		url: `${config.relayUrl}/analysis/${actionId}`,
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		bodyString: JSON.stringify({
-			agentId: 'pending',
-			actionId: Number(actionId),
-			score: analysis.score,
-			decision: analysis.decision,
-			reasoning: analysis.reasoning,
-			instruction: instruction,
-			target: target,
-			value: actionValue.toString(),
-		}),
+		body: btoa(analysisBody),
 	})
 	runtime.log(`Analysis posted to relay for action #${actionId}`)
 
