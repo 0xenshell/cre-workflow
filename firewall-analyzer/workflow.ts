@@ -201,9 +201,59 @@ const toHex = (v: Uint8Array | string): `0x${string}` => {
 	return bytesToHex(v) as `0x${string}`
 }
 
+// ─── Resolve Agent ID from Contract ──────────────────────────
+function resolveAgentId(
+	runtime: Runtime<Config>,
+	actionId: bigint,
+): string {
+	const config = runtime.config
+
+	const network = getNetwork({
+		chainFamily: 'evm',
+		chainSelectorName: config.chainSelectorName,
+		isTestnet: true,
+	})
+	if (!network) throw new Error(`Network not found: ${config.chainSelectorName}`)
+
+	const evmClient = new EVMClient(network.chainSelector.selector)
+	const contractAddr = config.firewallContractAddress
+
+	const callData = encodeFunctionData({
+		abi: FIREWALL_ABI,
+		functionName: 'getQueuedAction',
+		args: [actionId],
+	})
+
+	const hexAddr = contractAddr.startsWith('0x')
+		? contractAddr as `0x${string}`
+		: `0x${Buffer.from(contractAddr, 'base64').toString('hex')}` as `0x${string}`
+
+	const callResult = evmClient.callContract(runtime, {
+		call: encodeCallMsg({
+			from: '0x0000000000000000000000000000000000000000',
+			to: hexAddr,
+			data: callData,
+		}),
+	}).result()
+
+	const returnData = typeof callResult.data === 'string'
+		? `0x${Buffer.from(callResult.data, 'base64').toString('hex')}` as `0x${string}`
+		: bytesToHex(callResult.data) as `0x${string}`
+
+	const [structData] = decodeAbiParameters(
+		parseAbiParameters('(string, address, uint256, bytes, bytes32, uint256, bool, uint8)'),
+		returnData,
+	)
+
+	const agentId = structData[0] as string
+	runtime.log(`Resolved agentId from contract: ${agentId}`)
+	return agentId
+}
+
 // ─── Write Report On-Chain ───────────────────────────────────
 function writeReportOnChain(
 	runtime: Runtime<Config>,
+	agentId: string,
 	actionId: bigint,
 	decision: number,
 	threatScore: number,
@@ -219,52 +269,15 @@ function writeReportOnChain(
 
 	const evmClient = new EVMClient(network.chainSelector.selector)
 	const contractAddr = config.firewallContractAddress
-	runtime.log(`contractAddr value: ${contractAddr}`)
-
-	// Read the agentId from the contract's action queue
-	const callData = encodeFunctionData({
-		abi: FIREWALL_ABI,
-		functionName: 'getQueuedAction',
-		args: [actionId],
-	})
-
-	// Convert address to hex if it's base64 (CRE runtime normalizes config values)
 	const hexAddr = contractAddr.startsWith('0x')
 		? contractAddr as `0x${string}`
 		: `0x${Buffer.from(contractAddr, 'base64').toString('hex')}` as `0x${string}`
 
-	const callResult = evmClient.callContract(runtime, {
-		call: encodeCallMsg({
-			from: '0x0000000000000000000000000000000000000000',
-			to: hexAddr,
-			data: callData,
-		}),
-	}).result()
-
-	// callResult.data is Uint8Array or base64 string
-	const returnData = typeof callResult.data === 'string'
-		? `0x${Buffer.from(callResult.data, 'base64').toString('hex')}` as `0x${string}`
-		: bytesToHex(callResult.data) as `0x${string}`
-
-	runtime.log(`callContract returnData: ${returnData.substring(0, 130)}...`)
-
-	// Return is a struct wrapped in an outer tuple — decode as a single tuple param
-	const [structData] = decodeAbiParameters(
-		parseAbiParameters('(string, address, uint256, bytes, bytes32, uint256, bool, uint8)'),
-		returnData,
-	)
-
-	const agentId = structData[0] as string
-	runtime.log(`Resolved agentId from contract: ${agentId}`)
-
-	// ABI-encode report matching contract's abi.decode order:
-	// (string agentId, uint256 actionId, uint8 decision, uint256 rawThreatScore)
 	const encodedReport = encodeAbiParameters(
 		parseAbiParameters('string, uint256, uint8, uint256'),
 		[agentId, actionId, decision, BigInt(threatScore)],
 	)
 
-	// Prepare and sign the report through the DON
 	const reportRequest = prepareReportRequest(encodedReport)
 	const signedReport = runtime.report(reportRequest).result()
 	const result = evmClient.writeReport(runtime, {
@@ -315,10 +328,13 @@ export const onActionSubmitted = (
 	// Step 5 - Analyze with Claude via Confidential HTTP
 	const analysis = analyzeWithClaude(runtime, instruction, target, actionValue.toString())
 
-	// Step 6 - Post analysis to relay for dashboard display
+	// Step 6 - Resolve agent ID from contract
+	const agentId = resolveAgentId(runtime, actionId)
+
+	// Step 7 - Post analysis to relay for dashboard display
 	const httpClient = new HTTPClient()
 	const analysisBody = JSON.stringify({
-		agentId: 'pending',
+		agentId: agentId,
 		actionId: Number(actionId),
 		score: analysis.score,
 		decision: analysis.decision,
@@ -345,8 +361,8 @@ export const onActionSubmitted = (
 	})
 	runtime.log(`Analysis posted to relay for action #${actionId}`)
 
-	// Step 7 - Write report on-chain (resolveAction + updateThreatScore)
-	writeReportOnChain(runtime, actionId, analysis.decision, analysis.score)
+	// Step 8 - Write report on-chain (resolveAction + updateThreatScore)
+	writeReportOnChain(runtime, agentId, actionId, analysis.decision, analysis.score)
 
 	runtime.log(`Pipeline complete: action=${actionId}, decision=${analysis.decision}, score=${analysis.score}`)
 
