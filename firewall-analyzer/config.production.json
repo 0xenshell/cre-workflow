@@ -1,5 +1,5 @@
 {
   "chainSelectorName": "ethereum-testnet-sepolia",
-  "firewallContractAddress": "0xf78910b66AE2f7E33038578e1500b157776a0597",
+  "firewallContractAddress": "0x3886791bd82ff55294FaaEcCe3624A2376978dB2",
   "relayUrl": "https://relay.enshell.xyz"
 }
