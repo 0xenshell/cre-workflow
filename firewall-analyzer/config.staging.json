@@ -1,3 +1,5 @@
 {
-  "schedule": "*/30 * * * * *"
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "firewallContractAddress": "0xeb91387Ea4B7ADF8fA4901B22B2B72d7c54cbF13",
+  "relayUrl": "https://relay.enshell.xyz"
 }

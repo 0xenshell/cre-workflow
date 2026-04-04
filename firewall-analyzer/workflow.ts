@@ -1,64 +1,79 @@
 import {
-	CronCapability,
-	handler,
+	cre,
+	getNetwork,
 	type Runtime,
 } from '@chainlink/cre-sdk'
 import { z } from 'zod'
-import { getPublicKey, getSharedSecret } from '@noble/secp256k1'
-import { gcm } from '@noble/ciphers/aes.js'
-import { sha256 } from '@noble/hashes/sha2.js'
+import {
+	type Address,
+	parseAbi,
+	encodeAbiParameters,
+	parseAbiParameters,
+	keccak256,
+	toBytes,
+	toHex,
+} from 'viem'
 
 // ─── Config Schema ──────────────────────────────────────────
 export const configSchema = z.object({
-	schedule: z.string(),
+	chainSelectorName: z.string(),
+	firewallContractAddress: z.string(),
+	relayUrl: z.string(),
 })
 type Config = z.infer<typeof configSchema>
 
-// ─── Crypto Test ────────────────────────────────────────────
-function testCrypto(runtime: Runtime<Config>): string {
-	// Generate a keypair (simulating the CRE oracle)
-	const privateKey = sha256(new TextEncoder().encode('test-private-key-for-simulation'))
-	const publicKey = getPublicKey(privateKey, true) // compressed
+// ─── AgentFirewall ABI ──────────────────────────────────────
+const FIREWALL_ABI = parseAbi([
+	'event ActionSubmitted(uint256 indexed actionId, string indexed agentId, address target, uint256 value, bytes32 instructionHash)',
+	'function onReport(bytes metadata, bytes report) external',
+])
 
-	runtime.log(`Public key (hex): ${Buffer.from(publicKey).toString('hex')}`)
+// ─── ActionSubmitted event signature ────────────────────────
+const ACTION_SUBMITTED_SIG = keccak256(
+	toBytes('ActionSubmitted(uint256,string,address,uint256,bytes32)')
+)
 
-	// Simulate SDK encryption
-	const message = 'Send 0.05 ETH to treasury for weekly budget'
-	const ephemeralPrivate = sha256(new TextEncoder().encode('ephemeral-key-for-test'))
-	const ephemeralPublic = getPublicKey(ephemeralPrivate, true)
+// ─── Log Trigger Callback ───────────────────────────────────
+export const onActionSubmitted = (
+	runtime: Runtime<Config>,
+): string => {
+	const config = runtime.config
 
-	// ECDH: SDK derives shared secret using oracle's public key
-	const sharedSecretSDK = getSharedSecret(ephemeralPrivate, publicKey)
-	const aesKeySDK = sha256(sharedSecretSDK)
+	runtime.log('ActionSubmitted event detected')
 
-	// Encrypt
-	const nonce = new Uint8Array(12) // zero nonce for test
-	const cipher = gcm(aesKeySDK, nonce)
-	const plaintext = new TextEncoder().encode(message)
-	const ciphertext = cipher.encrypt(plaintext)
+	// TODO: Step 1 - Decode event data (actionId, agentId, instructionHash)
+	// TODO: Step 2 - Fetch encrypted instruction from relay
+	// TODO: Step 3 - Decrypt instruction inside TEE
+	// TODO: Step 4 - Run analysis (Defender + Claude via Confidential HTTP)
+	// TODO: Step 5 - Compute score and decision
+	// TODO: Step 6 - Write report on-chain (resolveAction + updateThreatScore)
 
-	runtime.log(`Encrypted length: ${ciphertext.length}`)
+	runtime.log('Analysis pipeline placeholder - will be implemented step by step')
 
-	// Simulate CRE decryption
-	const sharedSecretCRE = getSharedSecret(privateKey, ephemeralPublic)
-	const aesKeyCRE = sha256(sharedSecretCRE)
-
-	const decipher = gcm(aesKeyCRE, nonce)
-	const decrypted = decipher.decrypt(ciphertext)
-	const decryptedText = new TextDecoder().decode(decrypted)
-
-	runtime.log(`Decrypted: ${decryptedText}`)
-
-	const success = decryptedText === message
-	runtime.log(`Crypto roundtrip: ${success ? 'SUCCESS' : 'FAILED'}`)
-
-	return success ? 'Crypto works in CRE WASM!' : 'CRYPTO FAILED'
+	return 'Pipeline pending'
 }
 
 // ─── Workflow Init ──────────────────────────────────────────
 export function initWorkflow(config: Config) {
-	const cron = new CronCapability()
+	const network = getNetwork({
+		chainFamily: 'evm',
+		chainSelectorName: config.chainSelectorName,
+		isTestnet: true,
+	})
+	if (!network) throw new Error(`Network not found: ${config.chainSelectorName}`)
+
+	const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+
+	// Listen for ActionSubmitted events on the AgentFirewall contract
+	const actionSubmittedTrigger = evmClient.logTrigger({
+		contractAddress: config.firewallContractAddress as Address,
+		eventSignature: ACTION_SUBMITTED_SIG,
+	})
+
 	return [
-		handler(cron.trigger({ schedule: config.schedule }), testCrypto),
+		cre.handler(
+			actionSubmittedTrigger,
+			onActionSubmitted,
+		),
 	]
 }
