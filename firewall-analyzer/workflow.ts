@@ -8,6 +8,7 @@ import {
 	handler,
 	bytesToHex,
 	hexToBase64,
+	prepareReportRequest,
 	type Runtime,
 	type EVMLog,
 } from '@chainlink/cre-sdk'
@@ -202,8 +203,23 @@ function writeReportOnChain(
 
 	const evmClient = new EVMClient(network.chainSelector.selector)
 
-	// Log the analysis result (on-chain write-back will be added with generated bindings)
-	runtime.log(`Analysis complete: agent=${agentId}, action=${actionId}, decision=${decision}, score=${threatScore}`)
+	// ABI-encode the report data: (actionId, agentId, decision, threatScore)
+	const encodedReport = encodeAbiParameters(
+		parseAbiParameters('uint256, string, uint8, uint256'),
+		[actionId, agentId, decision, BigInt(threatScore)],
+	)
+
+	// Prepare and sign the report through the DON
+	const reportRequest = prepareReportRequest(encodedReport)
+	const signedReport = runtime.report(reportRequest).result()
+
+	// Write the signed report to the firewall contract
+	const result = evmClient.writeReport(runtime, {
+		receiver: config.firewallContractAddress,
+		report: signedReport,
+	}).result()
+
+	runtime.log(`On-chain write complete: status=${result.txStatus}, txHash=${result.txHash ? bytesToHex(result.txHash) : 'N/A'}`)
 }
 
 // ─── Log Trigger Callback (full pipeline) ───────────────────
@@ -216,8 +232,15 @@ export const onActionSubmitted = (
 	runtime.log('ActionSubmitted event detected - starting analysis pipeline')
 
 	// Step 1 - Decode event data from the log
-	const topics = log.topics.map((topic) => bytesToHex(topic)) as [`0x${string}`, ...`0x${string}`[]]
-	const data = bytesToHex(log.data) as `0x${string}`
+	// CRE runtime may deliver log fields as base64 strings (LogJson) instead of Uint8Array (Log)
+	const toHex = (v: Uint8Array | string): `0x${string}` => {
+		if (typeof v === 'string') {
+			return `0x${Buffer.from(v, 'base64').toString('hex')}` as `0x${string}`
+		}
+		return bytesToHex(v) as `0x${string}`
+	}
+	const topics = log.topics.map(toHex) as [`0x${string}`, ...`0x${string}`[]]
+	const data = toHex(log.data)
 
 	const decoded = decodeEventLog({
 		abi: FIREWALL_ABI,
