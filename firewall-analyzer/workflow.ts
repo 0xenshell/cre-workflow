@@ -180,29 +180,77 @@ Guidelines:
 	}
 }
 
-// ─── Log Trigger Callback ───────────────────────────────────
+// ─── Write Report On-Chain ───────────────────────────────────
+function writeReportOnChain(
+	runtime: Runtime<Config>,
+	agentId: string,
+	actionId: bigint,
+	decision: number,
+	threatScore: number,
+): void {
+	const config = runtime.config
+
+	const network = getNetwork({
+		chainFamily: 'evm',
+		chainSelectorName: config.chainSelectorName,
+		isTestnet: true,
+	})
+	if (!network) throw new Error(`Network not found: ${config.chainSelectorName}`)
+
+	const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+
+	// ABI-encode the report: (string agentId, uint256 actionId, uint8 decision, uint256 rawThreatScore)
+	const reportData = encodeAbiParameters(
+		parseAbiParameters('string, uint256, uint8, uint256'),
+		[agentId, actionId, decision, BigInt(threatScore)],
+	)
+
+	// Generate signed report
+	const signedReport = runtime.report(reportData)
+
+	// Submit to the AgentFirewall contract via KeystoneForwarder
+	const writeResult = evmClient.writeReport(signedReport, {
+		receiverAddress: config.firewallContractAddress as Address,
+		gasLimit: '500000',
+	}).result()
+
+	runtime.log(`Report written on-chain: decision=${decision}, score=${threatScore}, tx status=${writeResult.txStatus}`)
+}
+
+// ─── Log Trigger Callback (full pipeline) ───────────────────
 export const onActionSubmitted = (
 	runtime: Runtime<Config>,
 ): string => {
 	const config = runtime.config
 
-	runtime.log('ActionSubmitted event detected')
+	runtime.log('ActionSubmitted event detected - starting analysis pipeline')
 
-	// TODO: Step 1 - Decode event data (actionId, agentId, instructionHash) from trigger payload
-	// For now, using placeholder values until we wire up the trigger payload decoding
+	// Step 1 - Get oracle private key from secrets
+	const oraclePrivateKey = runtime.getSecret('ORACLE_PRIVATE_KEY')
+
+	// TODO: Step 2 - Decode event data (actionId, agentId, target, value, instructionHash)
+	// These will come from the trigger payload once wired up
+	const agentId = 'placeholder'
+	const actionId = 0n
+	const target = '0x0000000000000000000000000000000000000000'
+	const value = '0'
 	const instructionHash = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
-	// Step 2 - Fetch encrypted instruction from relay
-	// const encryptedPayload = fetchFromRelay(runtime, instructionHash)
+	// Step 3 - Fetch encrypted instruction from relay
+	const encryptedPayload = fetchFromRelay(runtime, instructionHash)
 
-	// TODO: Step 3 - Decrypt instruction inside TEE
-	// TODO: Step 4 - Run analysis (Defender + Claude via Confidential HTTP)
-	// TODO: Step 5 - Compute score and decision
-	// TODO: Step 6 - Write report on-chain (resolveAction + updateThreatScore)
+	// Step 4 - Decrypt instruction inside TEE
+	const instruction = decryptInstruction(runtime, encryptedPayload, oraclePrivateKey)
 
-	runtime.log('Relay fetch ready, remaining pipeline steps pending')
+	// Step 5 - Analyze with Claude via Confidential HTTP
+	const analysis = analyzeWithClaude(runtime, instruction, target, value)
 
-	return 'Relay fetch implemented'
+	// Step 6 - Write report on-chain (resolveAction + updateThreatScore)
+	writeReportOnChain(runtime, agentId, actionId, analysis.decision, analysis.score)
+
+	runtime.log(`Pipeline complete: agent=${agentId}, action=${actionId}, decision=${analysis.decision}, score=${analysis.score}`)
+
+	return `Analyzed: ${analysis.reasoning}`
 }
 
 // ─── Workflow Init ──────────────────────────────────────────
