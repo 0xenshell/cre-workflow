@@ -309,13 +309,32 @@ export const onActionSubmitted = (
 	// Step 3 - Fetch encrypted instruction from relay
 	const encryptedPayload = fetchFromRelay(runtime, instructionHash)
 
-	// Step 4 - Decrypt instruction inside TEE
+	// Step 4 - Decrypt instruction
 	const instruction = decryptInstruction(runtime, encryptedPayload, oraclePrivateKey)
 
 	// Step 5 - Analyze with Claude via Confidential HTTP
 	const analysis = analyzeWithClaude(runtime, instruction, target, actionValue.toString())
 
-	// Step 6 - Write report on-chain (resolveAction + updateThreatScore)
+	// Step 6 - Post analysis to relay for dashboard display
+	const httpClient = new HTTPClient()
+	httpClient.sendRequest(runtime, {
+		url: `${config.relayUrl}/analysis/${actionId}`,
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		bodyString: JSON.stringify({
+			agentId: 'pending',
+			actionId: Number(actionId),
+			score: analysis.score,
+			decision: analysis.decision,
+			reasoning: analysis.reasoning,
+			instruction: instruction,
+			target: target,
+			value: actionValue.toString(),
+		}),
+	})
+	runtime.log(`Analysis posted to relay for action #${actionId}`)
+
+	// Step 7 - Write report on-chain (resolveAction + updateThreatScore)
 	writeReportOnChain(runtime, actionId, analysis.decision, analysis.score)
 
 	runtime.log(`Pipeline complete: action=${actionId}, decision=${analysis.decision}, score=${analysis.score}`)
