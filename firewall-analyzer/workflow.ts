@@ -202,10 +202,11 @@ const toHex = (v: Uint8Array | string): `0x${string}` => {
 }
 
 // ─── Resolve Agent ID from Contract ──────────────────────────
-function resolveAgentId(
+// ─── Read Queued Action from Contract ────────────────────────
+function readQueuedAction(
 	runtime: Runtime<Config>,
 	actionId: bigint,
-): string {
+): { agentId: string; decision: number } {
 	const config = runtime.config
 
 	const network = getNetwork({
@@ -246,8 +247,9 @@ function resolveAgentId(
 	)
 
 	const agentId = structData[0] as string
-	runtime.log(`Resolved agentId from contract: ${agentId}`)
-	return agentId
+	const decision = Number(structData[7])
+	runtime.log(`Queued action: agentId=${agentId}, decision=${decision}`)
+	return { agentId, decision }
 }
 
 // ─── Write Report On-Chain ───────────────────────────────────
@@ -325,11 +327,16 @@ export const onActionSubmitted = (
 	// Step 4 - Decrypt instruction
 	const instruction = decryptInstruction(runtime, encryptedPayload, oraclePrivateKey)
 
-	// Step 5 - Analyze with Claude via Confidential HTTP
-	const analysis = analyzeWithClaude(runtime, instruction, target, actionValue.toString())
+	// Step 5 - Read queued action from contract (check if already resolved)
+	const queuedAction = readQueuedAction(runtime, actionId)
+	if (queuedAction.decision !== 0) {
+		runtime.log(`Action #${actionId} already resolved (decision=${queuedAction.decision}), skipping`)
+		return 'Already resolved'
+	}
+	const agentId = queuedAction.agentId
 
-	// Step 6 - Resolve agent ID from contract
-	const agentId = resolveAgentId(runtime, actionId)
+	// Step 6 - Analyze with Claude via Confidential HTTP
+	const analysis = analyzeWithClaude(runtime, instruction, target, actionValue.toString())
 
 	// Step 7 - Post analysis to relay for dashboard display
 	const httpClient = new HTTPClient()
