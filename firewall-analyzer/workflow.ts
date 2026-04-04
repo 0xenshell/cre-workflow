@@ -285,6 +285,7 @@ function writeReportOnChain(
 	const result = evmClient.writeReport(runtime, {
 		receiver: hexAddr,
 		report: signedReport,
+		gasConfig: { gasLimit: '500000' },
 	}).result()
 	runtime.log(`On-chain write complete: status=${result.txStatus}, txHash=${result.txHash ? bytesToHex(result.txHash) : 'N/A'}`)
 }
