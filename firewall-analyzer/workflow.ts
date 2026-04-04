@@ -153,12 +153,13 @@ Guidelines:
 				'content-type': { values: ['application/json'] },
 			},
 			bodyString: JSON.stringify({
-				model: 'claude-3-5-sonnet-20241022',
-				max_tokens: 256,
-				messages: [{
-					role: 'user',
-					content: prompt,
-				}],
+				model: 'claude-sonnet-4-20250514',
+				max_tokens: 1000,
+				system: 'You are a security analyzer. You MUST respond with ONLY a valid JSON object matching this exact schema: { "score": number, "decision": number, "reasoning": string }. No markdown, no explanation, no wrapping — just the raw JSON object.',
+				messages: [
+					{ role: 'user', content: prompt },
+					{ role: 'assistant', content: '{' },
+				],
 			}),
 		},
 		vaultDonSecrets: [{ key: 'ANTHROPIC_API_KEY' }],
@@ -172,7 +173,7 @@ Guidelines:
 
 	try {
 		const claudeResponse = json(response) as { content: Array<{ text: string }> }
-		const text = claudeResponse.content[0].text
+		const text = '{' + claudeResponse.content[0].text
 		const analysis = JSON.parse(text) as ClaudeAnalysis
 		runtime.log(`Claude analysis: score=${analysis.score}, decision=${analysis.decision}`)
 		return analysis
