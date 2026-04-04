@@ -1,6 +1,7 @@
 import {
 	cre,
 	getNetwork,
+	sendRequest,
 	type Runtime,
 } from '@chainlink/cre-sdk'
 import { z } from 'zod'
@@ -9,6 +10,7 @@ import {
 	parseAbi,
 	encodeAbiParameters,
 	parseAbiParameters,
+	decodeAbiParameters,
 	keccak256,
 	toBytes,
 	toHex,
@@ -33,6 +35,32 @@ const ACTION_SUBMITTED_SIG = keccak256(
 	toBytes('ActionSubmitted(uint256,string,address,uint256,bytes32)')
 )
 
+// ─── Relay Response Schema ───────────────────────────────────
+const relayResponseSchema = z.object({
+	hash: z.string(),
+	encryptedPayload: z.string(),
+})
+
+// ─── Fetch Encrypted Instruction from Relay ─────────────────
+function fetchFromRelay(
+	runtime: Runtime<Config>,
+	instructionHash: string,
+): string {
+	const config = runtime.config
+	const url = `${config.relayUrl}/relay/${instructionHash}`
+
+	runtime.log(`Fetching from relay: ${url}`)
+
+	const response = sendRequest(runtime, {
+		url,
+		method: 'GET',
+		responseSchema: relayResponseSchema,
+	})
+
+	runtime.log(`Relay response received: payload length ${response.encryptedPayload.length}`)
+	return response.encryptedPayload
+}
+
 // ─── Log Trigger Callback ───────────────────────────────────
 export const onActionSubmitted = (
 	runtime: Runtime<Config>,
@@ -41,16 +69,21 @@ export const onActionSubmitted = (
 
 	runtime.log('ActionSubmitted event detected')
 
-	// TODO: Step 1 - Decode event data (actionId, agentId, instructionHash)
-	// TODO: Step 2 - Fetch encrypted instruction from relay
+	// TODO: Step 1 - Decode event data (actionId, agentId, instructionHash) from trigger payload
+	// For now, using placeholder values until we wire up the trigger payload decoding
+	const instructionHash = '0x0000000000000000000000000000000000000000000000000000000000000000'
+
+	// Step 2 - Fetch encrypted instruction from relay
+	// const encryptedPayload = fetchFromRelay(runtime, instructionHash)
+
 	// TODO: Step 3 - Decrypt instruction inside TEE
 	// TODO: Step 4 - Run analysis (Defender + Claude via Confidential HTTP)
 	// TODO: Step 5 - Compute score and decision
 	// TODO: Step 6 - Write report on-chain (resolveAction + updateThreatScore)
 
-	runtime.log('Analysis pipeline placeholder - will be implemented step by step')
+	runtime.log('Relay fetch ready, remaining pipeline steps pending')
 
-	return 'Pipeline pending'
+	return 'Relay fetch implemented'
 }
 
 // ─── Workflow Init ──────────────────────────────────────────
