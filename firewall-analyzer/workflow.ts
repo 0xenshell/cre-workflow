@@ -1,11 +1,15 @@
 import {
-	cre,
-	getNetwork,
-	sendRequest,
+	EVMClient,
+	HTTPClient,
 	ConfidentialHTTPClient,
+	getNetwork,
 	ok,
 	json,
+	handler,
+	bytesToHex,
+	hexToBase64,
 	type Runtime,
+	type EVMLog,
 } from '@chainlink/cre-sdk'
 import { z } from 'zod'
 import {
@@ -13,10 +17,9 @@ import {
 	parseAbi,
 	encodeAbiParameters,
 	parseAbiParameters,
-	decodeAbiParameters,
+	decodeEventLog,
 	keccak256,
 	toBytes,
-	toHex,
 } from 'viem'
 import { getSharedSecret } from '@noble/secp256k1'
 import { gcm } from '@noble/ciphers/aes.js'
@@ -41,12 +44,6 @@ const ACTION_SUBMITTED_SIG = keccak256(
 	toBytes('ActionSubmitted(uint256,string,address,uint256,bytes32)')
 )
 
-// ─── Relay Response Schema ───────────────────────────────────
-const relayResponseSchema = z.object({
-	hash: z.string(),
-	encryptedPayload: z.string(),
-})
-
 // ─── Fetch Encrypted Instruction from Relay ─────────────────
 function fetchFromRelay(
 	runtime: Runtime<Config>,
@@ -57,14 +54,19 @@ function fetchFromRelay(
 
 	runtime.log(`Fetching from relay: ${url}`)
 
-	const response = sendRequest(runtime, {
+	const httpClient = new HTTPClient()
+	const response = httpClient.sendRequest(runtime, {
 		url,
 		method: 'GET',
-		responseSchema: relayResponseSchema,
-	})
+	}).result()
 
-	runtime.log(`Relay response received: payload length ${response.encryptedPayload.length}`)
-	return response.encryptedPayload
+	if (!ok(response)) {
+		throw new Error(`Relay fetch failed with status: ${response.statusCode}`)
+	}
+
+	const body = json(response) as { encryptedPayload: string }
+	runtime.log(`Relay response received: payload length ${body.encryptedPayload.length}`)
+	return body.encryptedPayload
 }
 
 // ─── Decrypt Instruction Inside TEE ─────────────────────────
@@ -150,8 +152,8 @@ Guidelines:
 				'anthropic-version': { values: ['2023-06-01'] },
 				'content-type': { values: ['application/json'] },
 			},
-			body: JSON.stringify({
-				model: 'claude-sonnet-4-20250514',
+			bodyString: JSON.stringify({
+				model: 'claude-3-5-sonnet-20241022',
 				max_tokens: 256,
 				messages: [{
 					role: 'user',
@@ -159,7 +161,7 @@ Guidelines:
 				}],
 			}),
 		},
-		vaultDonSecrets: [{ key: 'ANTHROPIC_API_KEY', owner: runtime.config.firewallContractAddress }],
+		vaultDonSecrets: [{ key: 'ANTHROPIC_API_KEY' }],
 	}).result()
 
 	if (!ok(response)) {
@@ -197,44 +199,47 @@ function writeReportOnChain(
 	})
 	if (!network) throw new Error(`Network not found: ${config.chainSelectorName}`)
 
-	const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+	const evmClient = new EVMClient(network.chainSelector.selector)
 
-	// ABI-encode the report: (string agentId, uint256 actionId, uint8 decision, uint256 rawThreatScore)
-	const reportData = encodeAbiParameters(
-		parseAbiParameters('string, uint256, uint8, uint256'),
-		[agentId, actionId, decision, BigInt(threatScore)],
-	)
-
-	// Generate signed report
-	const signedReport = runtime.report(reportData)
-
-	// Submit to the AgentFirewall contract via KeystoneForwarder
-	const writeResult = evmClient.writeReport(signedReport, {
-		receiverAddress: config.firewallContractAddress as Address,
-		gasLimit: '500000',
-	}).result()
-
-	runtime.log(`Report written on-chain: decision=${decision}, score=${threatScore}, tx status=${writeResult.txStatus}`)
+	// Log the analysis result (on-chain write-back will be added with generated bindings)
+	runtime.log(`Analysis complete: agent=${agentId}, action=${actionId}, decision=${decision}, score=${threatScore}`)
 }
 
 // ─── Log Trigger Callback (full pipeline) ───────────────────
 export const onActionSubmitted = (
 	runtime: Runtime<Config>,
+	log: EVMLog,
 ): string => {
 	const config = runtime.config
 
 	runtime.log('ActionSubmitted event detected - starting analysis pipeline')
 
-	// Step 1 - Get oracle private key from secrets
-	const oraclePrivateKey = runtime.getSecret('ORACLE_PRIVATE_KEY')
+	// Step 1 - Decode event data from the log
+	const topics = log.topics.map((topic) => bytesToHex(topic)) as [`0x${string}`, ...`0x${string}`[]]
+	const data = bytesToHex(log.data) as `0x${string}`
 
-	// TODO: Step 2 - Decode event data (actionId, agentId, target, value, instructionHash)
-	// These will come from the trigger payload once wired up
-	const agentId = 'placeholder'
-	const actionId = 0n
-	const target = '0x0000000000000000000000000000000000000000'
-	const value = '0'
-	const instructionHash = '0x0000000000000000000000000000000000000000000000000000000000000000'
+	const decoded = decodeEventLog({
+		abi: FIREWALL_ABI,
+		data,
+		topics,
+	})
+
+	const { actionId, target, value: actionValue, instructionHash } = decoded.args as {
+		actionId: bigint
+		agentId: string
+		target: string
+		value: bigint
+		instructionHash: string
+	}
+
+	// agentId is indexed (hashed in topic), we need to read it from the queued action
+	// For now we'll pass a placeholder and the contract's onReport decodes the agentId from the report
+	const agentId = 'pending'
+
+	runtime.log(`Action #${actionId}: target=${target}, value=${actionValue}, hash=${instructionHash}`)
+
+	// Step 2 - Get oracle private key from secrets
+	const oraclePrivateKey = runtime.getSecret({ id: 'ORACLE_PRIVATE_KEY' }).result().value
 
 	// Step 3 - Fetch encrypted instruction from relay
 	const encryptedPayload = fetchFromRelay(runtime, instructionHash)
@@ -243,7 +248,7 @@ export const onActionSubmitted = (
 	const instruction = decryptInstruction(runtime, encryptedPayload, oraclePrivateKey)
 
 	// Step 5 - Analyze with Claude via Confidential HTTP
-	const analysis = analyzeWithClaude(runtime, instruction, target, value)
+	const analysis = analyzeWithClaude(runtime, instruction, target, actionValue.toString())
 
 	// Step 6 - Write report on-chain (resolveAction + updateThreatScore)
 	writeReportOnChain(runtime, agentId, actionId, analysis.decision, analysis.score)
@@ -262,16 +267,18 @@ export function initWorkflow(config: Config) {
 	})
 	if (!network) throw new Error(`Network not found: ${config.chainSelectorName}`)
 
-	const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector)
+	const evmClient = new EVMClient(network.chainSelector.selector)
 
 	// Listen for ActionSubmitted events on the AgentFirewall contract
 	const actionSubmittedTrigger = evmClient.logTrigger({
-		contractAddress: config.firewallContractAddress as Address,
-		eventSignature: ACTION_SUBMITTED_SIG,
+		addresses: [hexToBase64(config.firewallContractAddress as `0x${string}`)],
+		topics: [
+			{ values: [hexToBase64(ACTION_SUBMITTED_SIG)] },
+		],
 	})
 
 	return [
-		cre.handler(
+		handler(
 			actionSubmittedTrigger,
 			onActionSubmitted,
 		),
