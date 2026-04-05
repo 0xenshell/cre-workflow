@@ -1,5 +1,9 @@
 # ENShell CRE Workflow
 
+[![CodeQuill – Verified authorship](https://app.codequill.xyz/badges/claim/48113dd8-3e96-4554-9ace-eb8f0705a2d6)](https://app.codequill.xyz/explore/0xenshell/cre-workflow)
+[![CodeQuill – Latest snapshot](https://app.codequill.xyz/badges/snapshot/48113dd8-3e96-4554-9ace-eb8f0705a2d6)](https://app.codequill.xyz/explore/0xenshell/cre-workflow)
+[![CodeQuill Trust Index](https://app.codequill.xyz/badges/trust/48113dd8-3e96-4554-9ace-eb8f0705a2d6)](https://app.codequill.xyz/explore/0xenshell/cre-workflow)
+
 Chainlink CRE workflow for **ENShell**. Listens for `ActionSubmitted` events on the AgentFirewall contract, runs a 4-layer threat analysis inside a Trusted Execution Environment, and writes the verdict back on-chain.
 
 ## Architecture
